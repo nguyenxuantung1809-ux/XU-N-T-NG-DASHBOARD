@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Accidental GitHub Desktop clone nested inside this project
+/*DASHBOARD/
