@@ -36,6 +36,73 @@ interface ChartsPageProps {
   onChartFilterChange: (chartFilter: ChartFilterState) => void
 }
 
+const INDICATOR_CHOICES: Array<{ type: ChartIndicatorConfig['type']; label: string }> = [
+  { type: 'SMA', label: 'Moving Average' },
+  { type: 'EMA', label: 'Exponential MA' },
+  { type: 'WMA', label: 'Weighted MA' },
+  { type: 'BOLLINGER', label: 'Bollinger Bands' },
+  { type: 'VWAP', label: 'VWAP' },
+  { type: 'SUPERTREND', label: 'Supertrend' },
+  { type: 'RSI', label: 'RSI' },
+  { type: 'MACD', label: 'MACD' },
+  { type: 'STOCHASTIC', label: 'Stochastic' },
+  { type: 'ATR', label: 'ATR' },
+  { type: 'ADX', label: 'ADX / DMI' },
+  { type: 'OBV', label: 'OBV' },
+  { type: 'ICHIMOKU', label: 'Ichimoku Cloud' },
+]
+
+type PaneIndicatorConfig = Extract<ChartIndicatorConfig, { height: number; zoom: number }>
+
+const PANE_INDICATOR_TYPES = new Set<ChartIndicatorConfig['type']>(['RSI', 'MACD', 'STOCHASTIC', 'ATR', 'ADX', 'OBV'])
+
+function createIndicator(type: ChartIndicatorConfig['type']): ChartIndicatorConfig {
+  switch (type) {
+    case 'SMA':
+      return { id: createId('indicator'), type, period: 20, color: '#38bdf8' }
+    case 'EMA':
+      return { id: createId('indicator'), type, period: 21, color: '#f59e0b' }
+    case 'WMA':
+      return { id: createId('indicator'), type, period: 20, color: '#22c55e' }
+    case 'BOLLINGER':
+      return { id: createId('indicator'), type, period: 20, multiplier: 2, color: '#60a5fa' }
+    case 'VWAP':
+      return { id: createId('indicator'), type, color: '#ec4899' }
+    case 'SUPERTREND':
+      return { id: createId('indicator'), type, period: 10, multiplier: 3 }
+    case 'RSI':
+      return { id: createId('indicator'), type, period: 14, height: 1.1, zoom: 1 }
+    case 'MACD':
+      return { id: createId('indicator'), type, fast: 12, slow: 26, signal: 9, height: 1.1, zoom: 1 }
+    case 'STOCHASTIC':
+      return { id: createId('indicator'), type, kPeriod: 14, dPeriod: 3, height: 1.1, zoom: 1 }
+    case 'ATR':
+      return { id: createId('indicator'), type, period: 14, height: 1, zoom: 1 }
+    case 'ADX':
+      return { id: createId('indicator'), type, period: 14, height: 1.1, zoom: 1 }
+    case 'OBV':
+      return { id: createId('indicator'), type, height: 1, zoom: 1 }
+    case 'ICHIMOKU':
+      return { id: createId('indicator'), type, tenkan: 9, kijun: 26, senkouB: 52 }
+  }
+}
+
+function isPaneIndicator(indicator: ChartIndicatorConfig): indicator is PaneIndicatorConfig {
+  return PANE_INDICATOR_TYPES.has(indicator.type)
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max)
+}
+
+function compactIndicatorLabel(type: ChartIndicatorConfig['type']) {
+  if (type === 'BOLLINGER') return 'BB'
+  if (type === 'STOCHASTIC') return 'STOCH'
+  if (type === 'SUPERTREND') return 'ST'
+  if (type === 'ICHIMOKU') return 'ICH'
+  return type
+}
+
 export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }: ChartsPageProps) {
   const [activePanelId, setActivePanelId] = useState(chartFilter.panels[0]?.id ?? '')
   const [symbolMenuOpen, setSymbolMenuOpen] = useState(false)
@@ -44,6 +111,8 @@ export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }
   const [replaySelectionMode, setReplaySelectionMode] = useState(false)
   const [syncTimeMasterId, setSyncTimeMasterId] = useState<string | null>(null)
   const [crosshair, setCrosshair] = useState<{ sourceId: string; timestamp: string } | null>(null)
+  const [hiddenIndicatorPanelIds, setHiddenIndicatorPanelIds] = useState<Set<string>>(() => new Set())
+  const [fullscreenPanelId, setFullscreenPanelId] = useState<string | null>(null)
   const chartRefs = useRef<Record<string, MarketChartHandle | null>>({})
   const syncTimeMasterIdRef = useRef<string | null>(null)
   const visiblePanelIdsRef = useRef<string[]>([])
@@ -114,11 +183,7 @@ export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }
 
   function addIndicator(type: ChartIndicatorConfig['type']) {
     if (!activePanel || activePanel.indicators.some((indicator) => indicator.type === type)) return
-    const indicator: ChartIndicatorConfig = type === 'RSI'
-      ? { id: createId('indicator'), type: 'RSI', period: 14 }
-      : type === 'MACD'
-        ? { id: createId('indicator'), type: 'MACD', fast: 12, slow: 26, signal: 9 }
-        : { id: createId('indicator'), type: 'ICHIMOKU', tenkan: 9, kijun: 26, senkouB: 52 }
+    const indicator = createIndicator(type)
     updatePanel(activePanel.id, (panel) => ({ ...panel, indicators: [...panel.indicators, indicator] }))
   }
 
@@ -130,7 +195,7 @@ export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }
     }))
   }
 
-  function patchIndicator(indicatorId: string, patch: Record<string, number>) {
+  function patchIndicator(indicatorId: string, patch: Record<string, number | string>) {
     if (!activePanel) return
     updatePanel(activePanel.id, (panel) => ({
       ...panel,
@@ -213,6 +278,169 @@ export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }
     })
   }
 
+  function setPanelIndicatorsHidden(panelId: string, hidden: boolean) {
+    setHiddenIndicatorPanelIds((current) => {
+      const next = new Set(current)
+      if (hidden) next.add(panelId)
+      else next.delete(panelId)
+      return next
+    })
+  }
+
+  function renderNumberControl(
+    indicatorId: string,
+    label: string,
+    key: string,
+    value: number,
+    min: number,
+    max: number,
+    step = 1,
+  ) {
+    return (
+      <label>
+        {label}
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(event) => {
+            const rawValue = Number(event.target.value)
+            const numericValue = Number.isFinite(rawValue) ? rawValue : value
+            const nextValue = step === 1 ? Math.round(numericValue) : numericValue
+            patchIndicator(indicatorId, { [key]: clampNumber(nextValue, min, max) })
+          }}
+        />
+      </label>
+    )
+  }
+
+  function renderColorControl(indicatorId: string, value: string) {
+    return (
+      <label>
+        Color
+        <input type="color" value={value} onChange={(event) => patchIndicator(indicatorId, { color: event.target.value })} />
+      </label>
+    )
+  }
+
+  function renderPaneControls(indicator: ChartIndicatorConfig) {
+    if (!isPaneIndicator(indicator)) return null
+    return (
+      <div className="indicator-pane-controls">
+        <label>
+          Height
+          <input
+            type="range"
+            min={0.55}
+            max={3}
+            step={0.05}
+            value={indicator.height}
+            onChange={(event) => patchIndicator(indicator.id, { height: Number(event.target.value) })}
+          />
+          <output>{indicator.height.toFixed(2)}x</output>
+        </label>
+        <label>
+          Zoom
+          <input
+            type="range"
+            min={0.5}
+            max={5}
+            step={0.05}
+            value={indicator.zoom}
+            onChange={(event) => patchIndicator(indicator.id, { zoom: Number(event.target.value) })}
+          />
+          <output>{indicator.zoom.toFixed(2)}x</output>
+        </label>
+      </div>
+    )
+  }
+
+  function renderIndicatorControls(indicator: ChartIndicatorConfig) {
+    if (indicator.type === 'SMA' || indicator.type === 'EMA' || indicator.type === 'WMA') {
+      return (
+        <div className="indicator-inputs">
+          {renderNumberControl(indicator.id, 'Period', 'period', indicator.period, 2, 500)}
+          {renderColorControl(indicator.id, indicator.color)}
+        </div>
+      )
+    }
+    if (indicator.type === 'BOLLINGER') {
+      return (
+        <div className="indicator-inputs">
+          {renderNumberControl(indicator.id, 'Period', 'period', indicator.period, 2, 500)}
+          {renderNumberControl(indicator.id, 'Dev', 'multiplier', indicator.multiplier, 0.1, 10, 0.1)}
+          {renderColorControl(indicator.id, indicator.color)}
+        </div>
+      )
+    }
+    if (indicator.type === 'VWAP') {
+      return <div className="indicator-inputs">{renderColorControl(indicator.id, indicator.color)}</div>
+    }
+    if (indicator.type === 'SUPERTREND') {
+      return (
+        <div className="indicator-inputs">
+          {renderNumberControl(indicator.id, 'ATR', 'period', indicator.period, 2, 200)}
+          {renderNumberControl(indicator.id, 'Factor', 'multiplier', indicator.multiplier, 0.1, 20, 0.1)}
+        </div>
+      )
+    }
+    if (indicator.type === 'RSI') {
+      return (
+        <>
+          <div className="indicator-inputs">
+            {renderNumberControl(indicator.id, 'Period', 'period', indicator.period, 2, 200)}
+          </div>
+          {renderPaneControls(indicator)}
+        </>
+      )
+    }
+    if (indicator.type === 'MACD') {
+      return (
+        <>
+          <div className="indicator-inputs">
+            {renderNumberControl(indicator.id, 'Fast', 'fast', indicator.fast, 2, 200)}
+            {renderNumberControl(indicator.id, 'Slow', 'slow', indicator.slow, 3, 300)}
+            {renderNumberControl(indicator.id, 'Signal', 'signal', indicator.signal, 2, 200)}
+          </div>
+          {renderPaneControls(indicator)}
+        </>
+      )
+    }
+    if (indicator.type === 'STOCHASTIC') {
+      return (
+        <>
+          <div className="indicator-inputs">
+            {renderNumberControl(indicator.id, '%K', 'kPeriod', indicator.kPeriod, 2, 200)}
+            {renderNumberControl(indicator.id, '%D', 'dPeriod', indicator.dPeriod, 1, 100)}
+          </div>
+          {renderPaneControls(indicator)}
+        </>
+      )
+    }
+    if (indicator.type === 'ATR' || indicator.type === 'ADX') {
+      return (
+        <>
+          <div className="indicator-inputs">
+            {renderNumberControl(indicator.id, 'Period', 'period', indicator.period, 2, 200)}
+          </div>
+          {renderPaneControls(indicator)}
+        </>
+      )
+    }
+    if (indicator.type === 'OBV') {
+      return renderPaneControls(indicator)
+    }
+    return (
+      <div className="indicator-inputs">
+        {renderNumberControl(indicator.id, 'Tenkan', 'tenkan', indicator.tenkan, 2, 200)}
+        {renderNumberControl(indicator.id, 'Kijun', 'kijun', indicator.kijun, 2, 200)}
+        {renderNumberControl(indicator.id, 'Span B', 'senkouB', indicator.senkouB, 2, 300)}
+      </div>
+    )
+  }
+
   if (orderedDatasets.length === 0) {
     return (
       <main className="chart-terminal empty-terminal">
@@ -279,12 +507,12 @@ export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }
                 <strong>Indicators</strong>
                 <span>{activeDataset?.name}</span>
               </div>
-              {(['RSI', 'MACD', 'ICHIMOKU'] as const).map((type) => {
+              {INDICATOR_CHOICES.map(({ type, label }) => {
                 const indicator = activePanel.indicators.find((item) => item.type === type)
                 return (
                   <div className="indicator-setting" key={type}>
                     <div>
-                      <strong>{type === 'ICHIMOKU' ? 'Ichimoku Cloud' : type}</strong>
+                      <strong>{label}</strong>
                       {!indicator && <button type="button" onClick={() => addIndicator(type)}>Add</button>}
                       {indicator && (
                         <button type="button" className="icon-button" title="Remove indicator" onClick={() => removeIndicator(indicator.id)}>
@@ -292,23 +520,7 @@ export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }
                         </button>
                       )}
                     </div>
-                    {indicator?.type === 'RSI' && (
-                      <label>Period <input type="number" min={2} value={indicator.period} onChange={(event) => patchIndicator(indicator.id, { period: Math.max(2, Number(event.target.value)) })} /></label>
-                    )}
-                    {indicator?.type === 'MACD' && (
-                      <div className="indicator-inputs">
-                        <label>Fast <input type="number" min={2} value={indicator.fast} onChange={(event) => patchIndicator(indicator.id, { fast: Math.max(2, Number(event.target.value)) })} /></label>
-                        <label>Slow <input type="number" min={3} value={indicator.slow} onChange={(event) => patchIndicator(indicator.id, { slow: Math.max(3, Number(event.target.value)) })} /></label>
-                        <label>Signal <input type="number" min={2} value={indicator.signal} onChange={(event) => patchIndicator(indicator.id, { signal: Math.max(2, Number(event.target.value)) })} /></label>
-                      </div>
-                    )}
-                    {indicator?.type === 'ICHIMOKU' && (
-                      <div className="indicator-inputs">
-                        <label>Tenkan <input type="number" min={2} value={indicator.tenkan} onChange={(event) => patchIndicator(indicator.id, { tenkan: Math.max(2, Number(event.target.value)) })} /></label>
-                        <label>Kijun <input type="number" min={2} value={indicator.kijun} onChange={(event) => patchIndicator(indicator.id, { kijun: Math.max(2, Number(event.target.value)) })} /></label>
-                        <label>Span B <input type="number" min={2} value={indicator.senkouB} onChange={(event) => patchIndicator(indicator.id, { senkouB: Math.max(2, Number(event.target.value)) })} /></label>
-                      </div>
-                    )}
+                    {indicator && renderIndicatorControls(indicator)}
                   </div>
                 )
               })}
@@ -359,7 +571,7 @@ export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }
           const model = dataset ? modelsById.get(dataset.id) : null
           return (
             <section
-              className={`market-chart-panel${panel.id === activePanel?.id ? ' active' : ''}`}
+              className={`market-chart-panel${panel.id === activePanel?.id ? ' active' : ''}${fullscreenPanelId === panel.id ? ' fullscreen' : ''}`}
               key={panel.id}
               onMouseDown={() => setActivePanelId(panel.id)}
             >
@@ -398,7 +610,7 @@ export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }
                 )}
                 <small>{model?.validRows.toLocaleString() ?? 0} candles</small>
                 <div className="panel-indicators">
-                  {panel.indicators.map((indicator) => <span key={indicator.id}>{indicator.type}</span>)}
+                  {panel.indicators.map((indicator) => <span key={indicator.id}>{compactIndicatorLabel(indicator.type)}</span>)}
                 </div>
                 <button
                   type="button"
@@ -408,17 +620,28 @@ export function ChartsPage({ datasets, theme, chartFilter, onChartFilterChange }
                 >
                   <Maximize2 size={14} />
                 </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  title={fullscreenPanelId === panel.id ? 'Exit full screen' : 'Full screen chart'}
+                  onClick={() => setFullscreenPanelId((current) => current === panel.id ? null : panel.id)}
+                >
+                  {fullscreenPanelId === panel.id ? <X size={14} /> : <Maximize2 size={14} />}
+                </button>
               </div>
               <MarketChart
                 ref={(chart) => { chartRefs.current[panel.id] = chart }}
                 dataset={dataset}
                 config={panel}
+                layoutKey={String(chartFilter.layout)}
                 theme={theme}
                 replayEnabled={chartFilter.replayEnabled && !replaySelectionMode}
                 replayDate={chartFilter.replayDate}
                 crosshairDate={crosshair?.timestamp ?? null}
                 crosshairSourceId={crosshair?.sourceId ?? null}
                 replaySelectionMode={replaySelectionMode}
+                indicatorsHidden={hiddenIndicatorPanelIds.has(panel.id)}
+                onIndicatorsHiddenChange={setPanelIndicatorsHidden}
                 onCrosshairChange={handleCrosshairChange}
                 onReplayPointSelect={handleReplayPointSelect}
                 onVisibleTimeRangeChange={handleVisibleTimeRangeChange}

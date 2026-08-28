@@ -1,9 +1,24 @@
 import * as echarts from 'echarts'
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
-import type { ChartPanelConfig, Dataset, ThemeMode, VisibleTimeRange } from '../types/market'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import type { ChartIndicatorConfig, ChartPanelConfig, Dataset, ThemeMode, VisibleTimeRange } from '../types/market'
 import { formatNumber } from '../utils/numbers'
 import { formatTimestampLabel } from '../utils/dates'
-import { calculateIchimoku, calculateMacd, calculateRsi } from '../utils/indicators'
+import {
+  calculateAdx,
+  calculateAtr,
+  calculateBollinger,
+  calculateEma,
+  calculateIchimoku,
+  calculateMacd,
+  calculateObv,
+  calculateRsi,
+  calculateSma,
+  calculateStochastic,
+  calculateSupertrend,
+  calculateVwap,
+  calculateWma,
+} from '../utils/indicators'
+import { ChartDrawingWorkspace } from './chart/ChartDrawingWorkspace'
 import {
   buildFutureTimestamps,
   buildMarketData,
@@ -21,12 +36,15 @@ export interface MarketChartHandle {
 interface MarketChartProps {
   dataset?: Dataset
   config: ChartPanelConfig
+  layoutKey: string
   theme: ThemeMode
   replayEnabled: boolean
   replayDate: string | null
   crosshairDate: string | null
   crosshairSourceId: string | null
   replaySelectionMode: boolean
+  indicatorsHidden: boolean
+  onIndicatorsHiddenChange: (panelId: string, hidden: boolean) => void
   onCrosshairChange: (panelId: string, timestamp: string | null) => void
   onReplayPointSelect: (panelId: string, timestamp: string) => void
   onVisibleTimeRangeChange: (panelId: string, range: VisibleTimeRange) => void
@@ -36,6 +54,58 @@ interface ViewportState {
   visibleCount: number
   endIndex: number
   followLatest: boolean
+}
+
+type PaneIndicatorConfig = Extract<ChartIndicatorConfig, { height: number; zoom: number }>
+type NullableSeries = Array<number | null>
+
+const PANE_INDICATOR_TYPES = new Set<ChartIndicatorConfig['type']>(['RSI', 'MACD', 'STOCHASTIC', 'ATR', 'ADX', 'OBV'])
+
+function isPaneIndicator(indicator: ChartIndicatorConfig): indicator is PaneIndicatorConfig {
+  return PANE_INDICATOR_TYPES.has(indicator.type)
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max)
+}
+
+function indicatorPaneWeight(indicator: PaneIndicatorConfig) {
+  return clamp(Number(indicator.height) || 1.1, 0.55, 3)
+}
+
+function normalizeZoom(zoom: number) {
+  return clamp(Number(zoom) || 1, 0.5, 5)
+}
+
+function indicatorZoom(indicator: PaneIndicatorConfig) {
+  return normalizeZoom(indicator.zoom)
+}
+
+function seriesExtent(seriesList: NullableSeries[]) {
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  seriesList.forEach((series) => {
+    series.forEach((value) => {
+      if (value === null || !Number.isFinite(value)) return
+      min = Math.min(min, value)
+      max = Math.max(max, value)
+    })
+  })
+  return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null
+}
+
+function zoomedAxisRange(seriesList: NullableSeries[], zoom: number, fallbackCenter = 0) {
+  const extent = seriesExtent(seriesList)
+  if (!extent) return { min: undefined, max: undefined }
+  const center = (extent.min + extent.max) / 2 || fallbackCenter
+  const baseSpan = Math.max(extent.max - extent.min, Math.abs(center) * 0.12, 1)
+  const span = baseSpan / normalizeZoom(zoom)
+  return { min: center - span / 2, max: center + span / 2 }
+}
+
+function boundedOscillatorRange(zoom: number) {
+  const span = 100 / normalizeZoom(zoom)
+  return { min: 50 - span / 2, max: 50 + span / 2 }
 }
 
 function escapeHtml(value: string) {
@@ -51,18 +121,23 @@ function escapeHtml(value: string) {
 export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(function MarketChart({
   dataset,
   config,
+  layoutKey,
   theme,
   replayEnabled,
   replayDate,
   crosshairDate,
   crosshairSourceId,
   replaySelectionMode,
+  indicatorsHidden,
+  onIndicatorsHiddenChange,
   onCrosshairChange,
   onReplayPointSelect,
   onVisibleTimeRangeChange,
 }, ref) {
   const chartRef = useRef<HTMLDivElement | null>(null)
   const instanceRef = useRef<echarts.ECharts | null>(null)
+  const [chartInstance, setChartInstance] = useState<echarts.ECharts | null>(null)
+  const [projectionVersion, setProjectionVersion] = useState(0)
   const timestampsRef = useRef<string[]>([])
   const timestampIndexRef = useRef<Map<string, number>>(new Map())
   const candleCountRef = useRef(0)
@@ -88,16 +163,20 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
     onReplayPointSelectRef.current(config.id, timestamp)
   }
   const model = useMemo(() => dataset ? buildMarketData(dataset) : null, [dataset])
+  const visibleIndicators = useMemo(
+    () => indicatorsHidden ? [] : config.indicators,
+    [config.indicators, indicatorsHidden],
+  )
   const candles = useMemo(
     () => model ? filterCandlesForReplay(model.candles, replayEnabled, replayDate) : [],
     [model, replayDate, replayEnabled],
   )
   const futureSlotCount = useMemo(() => Math.max(
     32,
-    ...config.indicators
+    ...visibleIndicators
       .filter((indicator) => indicator.type === 'ICHIMOKU')
       .map((indicator) => indicator.kijun),
-  ), [config.indicators])
+  ), [visibleIndicators])
   const timestamps = useMemo(() => {
     const history = candles.map((candle) => candle.timestamp)
     return [...history, ...buildFutureTimestamps(history, futureSlotCount)]
@@ -158,7 +237,11 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
     if (!chartRef.current) return
     const instance = echarts.init(chartRef.current, theme)
     instanceRef.current = instance
-    const resizeObserver = new ResizeObserver(() => instance.resize())
+    setChartInstance(instance)
+    const resizeObserver = new ResizeObserver(() => {
+      instance.resize()
+      setProjectionVersion((version) => version + 1)
+    })
     resizeObserver.observe(chartRef.current)
 
     const handleAxisPointer = (...args: unknown[]) => {
@@ -208,6 +291,7 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
         endIndex,
         followLatest: endIndex >= timestamps.length - 2,
       }
+      setProjectionVersion((version) => version + 1)
       if (suppressTimeRangeEventRef.current) return
       onVisibleTimeRangeChangeRef.current(config.id, {
         from: timestamps[startIndex],
@@ -268,6 +352,7 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
       instance.getZr().off('globalout', handleGlobalOut)
       instance.dispose()
       instanceRef.current = null
+      setChartInstance(null)
     }
   }, [config.id, onCrosshairChange, theme])
 
@@ -286,14 +371,19 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
     const closes = candles.map((candle) => candle.close)
     const highs = candles.map((candle) => candle.high)
     const lows = candles.map((candle) => candle.low)
-    const rsiConfigs = config.indicators.filter((indicator) => indicator.type === 'RSI')
-    const macdConfigs = config.indicators.filter((indicator) => indicator.type === 'MACD')
-    const ichimokuConfigs = config.indicators.filter((indicator) => indicator.type === 'ICHIMOKU')
+    const volumes = candles.map((candle) => candle.volume)
+    const paneIndicators = visibleIndicators.filter(isPaneIndicator)
+    const smaConfigs = visibleIndicators.filter((indicator) => indicator.type === 'SMA')
+    const emaConfigs = visibleIndicators.filter((indicator) => indicator.type === 'EMA')
+    const wmaConfigs = visibleIndicators.filter((indicator) => indicator.type === 'WMA')
+    const bollingerConfigs = visibleIndicators.filter((indicator) => indicator.type === 'BOLLINGER')
+    const vwapConfigs = visibleIndicators.filter((indicator) => indicator.type === 'VWAP')
+    const supertrendConfigs = visibleIndicators.filter((indicator) => indicator.type === 'SUPERTREND')
+    const ichimokuConfigs = visibleIndicators.filter((indicator) => indicator.type === 'ICHIMOKU')
     const paneSpecs = [
       { id: 'price', weight: 3 },
       ...(model.volumeDetected ? [{ id: 'volume', weight: 0.75 }] : []),
-      ...rsiConfigs.map((indicator) => ({ id: indicator.id, weight: 1.1 })),
-      ...macdConfigs.map((indicator) => ({ id: indicator.id, weight: 1.1 })),
+      ...paneIndicators.map((indicator) => ({ id: indicator.id, weight: indicatorPaneWeight(indicator) })),
     ]
     const gap = 1.6
     const usableHeight = 88 - gap * Math.max(paneSpecs.length - 1, 0)
@@ -301,7 +391,7 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
     let top = 3
     const grids = paneSpecs.map((pane) => {
       const height = usableHeight * pane.weight / totalWeight
-      const grid = { left: 10, right: 76, top: `${top}%`, height: `${height}%`, containLabel: false }
+      const grid = { left: 54, right: 76, top: `${top}%`, height: `${height}%`, containLabel: false }
       top += height + gap
       return grid
     })
@@ -403,6 +493,107 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
       paneIndex += 1
     }
 
+    smaConfigs.forEach((indicator) => {
+      series.push({
+        name: `SMA ${indicator.period}`,
+        type: 'line',
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data: calculateSma(closes, indicator.period),
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { width: 1.35, color: indicator.color },
+        itemStyle: { color: indicator.color },
+        z: 4,
+      })
+    })
+
+    emaConfigs.forEach((indicator) => {
+      series.push({
+        name: `EMA ${indicator.period}`,
+        type: 'line',
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data: calculateEma(closes, indicator.period),
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { width: 1.35, color: indicator.color },
+        itemStyle: { color: indicator.color },
+        z: 4,
+      })
+    })
+
+    wmaConfigs.forEach((indicator) => {
+      series.push({
+        name: `WMA ${indicator.period}`,
+        type: 'line',
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data: calculateWma(closes, indicator.period),
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { width: 1.25, color: indicator.color },
+        itemStyle: { color: indicator.color },
+        z: 4,
+      })
+    })
+
+    bollingerConfigs.forEach((indicator) => {
+      const bollinger = calculateBollinger(closes, indicator.period, indicator.multiplier)
+      ;[
+        { name: `BB Upper ${indicator.period}`, data: bollinger.upper, width: 1 },
+        { name: `BB Basis ${indicator.period}`, data: bollinger.middle, width: 1.2 },
+        { name: `BB Lower ${indicator.period}`, data: bollinger.lower, width: 1 },
+      ].forEach((line) => series.push({
+        name: line.name,
+        type: 'line',
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data: line.data,
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { width: line.width, color: indicator.color, opacity: line.name.includes('Basis') ? 0.95 : 0.62 },
+        itemStyle: { color: indicator.color },
+        z: 3,
+      }))
+    })
+
+    vwapConfigs.forEach((indicator) => {
+      series.push({
+        name: 'VWAP',
+        type: 'line',
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data: calculateVwap(highs, lows, closes, volumes),
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { width: 1.45, color: indicator.color },
+        itemStyle: { color: indicator.color },
+        z: 5,
+      })
+    })
+
+    supertrendConfigs.forEach((indicator) => {
+      const supertrend = calculateSupertrend(highs, lows, closes, indicator.period, indicator.multiplier)
+      const upLine = supertrend.line.map((value, index) => supertrend.direction[index] === 1 ? value : null)
+      const downLine = supertrend.line.map((value, index) => supertrend.direction[index] === -1 ? value : null)
+      ;[
+        { name: `Supertrend Up ${indicator.period}/${indicator.multiplier}`, data: upLine, color: '#22c55e' },
+        { name: `Supertrend Down ${indicator.period}/${indicator.multiplier}`, data: downLine, color: '#ef4444' },
+      ].forEach((line) => series.push({
+        name: line.name,
+        type: 'line',
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data: line.data,
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { width: 1.45, color: line.color },
+        itemStyle: { color: line.color },
+        z: 4,
+      }))
+    })
+
     ichimokuConfigs.forEach((indicator) => {
       const ichimoku = calculateIchimoku(
         highs,
@@ -471,63 +662,180 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
       }))
     })
 
-    rsiConfigs.forEach((indicator) => {
+    paneIndicators.forEach((indicator) => {
       const currentPane = paneIndex
-      yAxis[currentPane] = { ...yAxis[currentPane], min: 0, max: 100, scale: false }
-      series.push({
-        name: `RSI ${indicator.period}`,
-        type: 'line',
-        xAxisIndex: currentPane,
-        yAxisIndex: currentPane,
-        data: calculateRsi(closes, indicator.period),
-        showSymbol: false,
-        lineStyle: { width: 1.4, color: '#a78bfa' },
-        itemStyle: { color: '#a78bfa' },
-        markLine: {
-          symbol: 'none',
-          label: { show: false },
-          lineStyle: { type: 'dashed', color: '#64748b' },
-          data: [{ yAxis: 70 }, { yAxis: 30 }],
-        },
-      })
-      paneIndex += 1
-    })
+      const paneZoom = indicatorZoom(indicator)
 
-    macdConfigs.forEach((indicator) => {
-      const currentPane = paneIndex
-      const macd = calculateMacd(closes, indicator.fast, indicator.slow, indicator.signal)
-      series.push(
-        {
-          name: 'MACD',
+      if (indicator.type === 'RSI') {
+        const rsi = calculateRsi(closes, indicator.period)
+        yAxis[currentPane] = { ...yAxis[currentPane], ...boundedOscillatorRange(paneZoom), scale: false }
+        series.push({
+          name: `RSI ${indicator.period}`,
           type: 'line',
           xAxisIndex: currentPane,
           yAxisIndex: currentPane,
-          data: macd.macd,
+          data: rsi,
           showSymbol: false,
-          lineStyle: { width: 1.3, color: '#38bdf8' },
-          itemStyle: { color: '#38bdf8' },
-        },
-        {
-          name: 'Signal',
-          type: 'line',
-          xAxisIndex: currentPane,
-          yAxisIndex: currentPane,
-          data: macd.signal,
-          showSymbol: false,
-          lineStyle: { width: 1.2, color: '#f59e0b' },
-          itemStyle: { color: '#f59e0b' },
-        },
-        {
-          name: 'MACD Histogram',
-          type: 'bar',
-          xAxisIndex: currentPane,
-          yAxisIndex: currentPane,
-          data: macd.histogram,
-          itemStyle: {
-            color: (params) => Number(params.value ?? 0) >= 0 ? '#00b894' : '#f04455',
+          lineStyle: { width: 1.4, color: '#a78bfa' },
+          itemStyle: { color: '#a78bfa' },
+          markLine: {
+            symbol: 'none',
+            label: { show: false },
+            lineStyle: { type: 'dashed', color: '#64748b' },
+            data: [{ yAxis: 70 }, { yAxis: 30 }],
           },
-        },
-      )
+        })
+      }
+
+      if (indicator.type === 'MACD') {
+        const macd = calculateMacd(closes, indicator.fast, indicator.slow, indicator.signal)
+        yAxis[currentPane] = { ...yAxis[currentPane], ...zoomedAxisRange([macd.macd, macd.signal, macd.histogram], paneZoom), scale: true }
+        series.push(
+          {
+            name: 'MACD',
+            type: 'line',
+            xAxisIndex: currentPane,
+            yAxisIndex: currentPane,
+            data: macd.macd,
+            showSymbol: false,
+            lineStyle: { width: 1.3, color: '#38bdf8' },
+            itemStyle: { color: '#38bdf8' },
+          },
+          {
+            name: 'Signal',
+            type: 'line',
+            xAxisIndex: currentPane,
+            yAxisIndex: currentPane,
+            data: macd.signal,
+            showSymbol: false,
+            lineStyle: { width: 1.2, color: '#f59e0b' },
+            itemStyle: { color: '#f59e0b' },
+          },
+          {
+            name: 'MACD Histogram',
+            type: 'bar',
+            xAxisIndex: currentPane,
+            yAxisIndex: currentPane,
+            data: macd.histogram,
+            itemStyle: {
+              color: (params) => Number(params.value ?? 0) >= 0 ? '#00b894' : '#f04455',
+            },
+          },
+        )
+      }
+
+      if (indicator.type === 'STOCHASTIC') {
+        const stochastic = calculateStochastic(highs, lows, closes, indicator.kPeriod, indicator.dPeriod)
+        yAxis[currentPane] = { ...yAxis[currentPane], ...boundedOscillatorRange(paneZoom), scale: false }
+        series.push(
+          {
+            name: `%K ${indicator.kPeriod}`,
+            type: 'line',
+            xAxisIndex: currentPane,
+            yAxisIndex: currentPane,
+            data: stochastic.k,
+            showSymbol: false,
+            lineStyle: { width: 1.25, color: '#38bdf8' },
+            itemStyle: { color: '#38bdf8' },
+            markLine: {
+              symbol: 'none',
+              label: { show: false },
+              lineStyle: { type: 'dashed', color: '#64748b' },
+              data: [{ yAxis: 80 }, { yAxis: 20 }],
+            },
+          },
+          {
+            name: `%D ${indicator.dPeriod}`,
+            type: 'line',
+            xAxisIndex: currentPane,
+            yAxisIndex: currentPane,
+            data: stochastic.d,
+            showSymbol: false,
+            lineStyle: { width: 1.2, color: '#f59e0b' },
+            itemStyle: { color: '#f59e0b' },
+          },
+        )
+      }
+
+      if (indicator.type === 'ATR') {
+        const atr = calculateAtr(highs, lows, closes, indicator.period)
+        const axisRange = zoomedAxisRange([atr], paneZoom)
+        yAxis[currentPane] = {
+          ...yAxis[currentPane],
+          min: axisRange.min === undefined ? undefined : Math.max(0, axisRange.min),
+          max: axisRange.max,
+          scale: true,
+        }
+        series.push({
+          name: `ATR ${indicator.period}`,
+          type: 'line',
+          xAxisIndex: currentPane,
+          yAxisIndex: currentPane,
+          data: atr,
+          showSymbol: false,
+          lineStyle: { width: 1.3, color: '#fb923c' },
+          itemStyle: { color: '#fb923c' },
+        })
+      }
+
+      if (indicator.type === 'ADX') {
+        const adx = calculateAdx(highs, lows, closes, indicator.period)
+        yAxis[currentPane] = { ...yAxis[currentPane], ...boundedOscillatorRange(paneZoom), scale: false }
+        series.push(
+          {
+            name: `ADX ${indicator.period}`,
+            type: 'line',
+            xAxisIndex: currentPane,
+            yAxisIndex: currentPane,
+            data: adx.adx,
+            showSymbol: false,
+            lineStyle: { width: 1.35, color: '#f8fafc' },
+            itemStyle: { color: '#f8fafc' },
+            markLine: {
+              symbol: 'none',
+              label: { show: false },
+              lineStyle: { type: 'dashed', color: '#64748b' },
+              data: [{ yAxis: 25 }],
+            },
+          },
+          {
+            name: '+DI',
+            type: 'line',
+            xAxisIndex: currentPane,
+            yAxisIndex: currentPane,
+            data: adx.plusDi,
+            showSymbol: false,
+            lineStyle: { width: 1.15, color: '#22c55e' },
+            itemStyle: { color: '#22c55e' },
+          },
+          {
+            name: '-DI',
+            type: 'line',
+            xAxisIndex: currentPane,
+            yAxisIndex: currentPane,
+            data: adx.minusDi,
+            showSymbol: false,
+            lineStyle: { width: 1.15, color: '#ef4444' },
+            itemStyle: { color: '#ef4444' },
+          },
+        )
+      }
+
+      if (indicator.type === 'OBV') {
+        const obv = calculateObv(closes, volumes)
+        yAxis[currentPane] = { ...yAxis[currentPane], ...zoomedAxisRange([obv], paneZoom), scale: true }
+        series.push({
+          name: 'OBV',
+          type: 'line',
+          xAxisIndex: currentPane,
+          yAxisIndex: currentPane,
+          data: obv,
+          showSymbol: false,
+          lineStyle: { width: 1.3, color: '#14b8a6' },
+          itemStyle: { color: '#14b8a6' },
+        })
+      }
+
       paneIndex += 1
     })
 
@@ -592,7 +900,8 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
       ],
       series,
     }, true)
-  }, [candles, config.chartType, config.indicators, dataset, model, theme, timestamps])
+    setProjectionVersion((version) => version + 1)
+  }, [candles, config.chartType, dataset, model, theme, timestamps, visibleIndicators])
 
   useEffect(() => {
     const instance = instanceRef.current
@@ -628,6 +937,21 @@ export const MarketChart = forwardRef<MarketChartHandle, MarketChartProps>(funct
       }}
     >
       <div ref={chartRef} className="market-chart-canvas" />
+      <ChartDrawingWorkspace
+        chart={chartInstance}
+        layoutKey={layoutKey}
+        panelId={config.id}
+        symbolId={dataset?.id ?? ''}
+        symbol={dataset?.name ?? ''}
+        timeframe="1D"
+        timestamps={timestamps}
+        candles={candles}
+        disabled={Boolean(error) || replaySelectionMode}
+        projectionVersion={projectionVersion}
+        indicatorsHidden={indicatorsHidden}
+        onIndicatorsHiddenChange={(hidden) => onIndicatorsHiddenChange(config.id, hidden)}
+        onResetChart={() => instanceRef.current?.dispatchAction({ type: 'dataZoom', start: 0, end: 100 })}
+      />
       {error && (
         <div className="chart-error-state">
           <strong>Cannot render {dataset?.name ?? 'chart'}</strong>

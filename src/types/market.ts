@@ -39,10 +39,59 @@ export interface DatasetGroup {
   updatedAt: number
 }
 
+export interface PaneIndicatorSettings {
+  height: number
+  zoom: number
+}
+
+export interface SmaIndicatorConfig {
+  id: string
+  type: 'SMA'
+  period: number
+  color: string
+}
+
+export interface EmaIndicatorConfig {
+  id: string
+  type: 'EMA'
+  period: number
+  color: string
+}
+
+export interface WmaIndicatorConfig {
+  id: string
+  type: 'WMA'
+  period: number
+  color: string
+}
+
+export interface BollingerIndicatorConfig {
+  id: string
+  type: 'BOLLINGER'
+  period: number
+  multiplier: number
+  color: string
+}
+
+export interface VwapIndicatorConfig {
+  id: string
+  type: 'VWAP'
+  color: string
+}
+
+export interface SupertrendIndicatorConfig {
+  id: string
+  type: 'SUPERTREND'
+  period: number
+  multiplier: number
+}
+
 export interface RsiIndicatorConfig {
   id: string
   type: 'RSI'
   period: number
+  height: number
+  zoom: number
 }
 
 export interface MacdIndicatorConfig {
@@ -51,6 +100,32 @@ export interface MacdIndicatorConfig {
   fast: number
   slow: number
   signal: number
+  height: number
+  zoom: number
+}
+
+export interface StochasticIndicatorConfig extends PaneIndicatorSettings {
+  id: string
+  type: 'STOCHASTIC'
+  kPeriod: number
+  dPeriod: number
+}
+
+export interface AtrIndicatorConfig extends PaneIndicatorSettings {
+  id: string
+  type: 'ATR'
+  period: number
+}
+
+export interface AdxIndicatorConfig extends PaneIndicatorSettings {
+  id: string
+  type: 'ADX'
+  period: number
+}
+
+export interface ObvIndicatorConfig extends PaneIndicatorSettings {
+  id: string
+  type: 'OBV'
 }
 
 export interface IchimokuIndicatorConfig {
@@ -61,7 +136,20 @@ export interface IchimokuIndicatorConfig {
   senkouB: number
 }
 
-export type ChartIndicatorConfig = RsiIndicatorConfig | MacdIndicatorConfig | IchimokuIndicatorConfig
+export type ChartIndicatorConfig =
+  | SmaIndicatorConfig
+  | EmaIndicatorConfig
+  | WmaIndicatorConfig
+  | BollingerIndicatorConfig
+  | VwapIndicatorConfig
+  | SupertrendIndicatorConfig
+  | RsiIndicatorConfig
+  | MacdIndicatorConfig
+  | StochasticIndicatorConfig
+  | AtrIndicatorConfig
+  | AdxIndicatorConfig
+  | ObvIndicatorConfig
+  | IchimokuIndicatorConfig
 export type ChartLayoutMode = 1 | 2 | '2v' | 4
 export type ChartPriceType = 'candlestick' | 'line'
 
