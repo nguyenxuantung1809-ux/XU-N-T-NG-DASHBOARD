@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/clean-dist.mjs && tsc -b && vite build && node scripts/prepare-sites-dist.mjs",
     "lint": "oxlint",
     "test:daily": "node scripts/daily-excel-acceptance.mjs",
     "preview": "vite preview"
@@ -20,6 +20,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@openai/sites-vite-plugin": "0.2.0",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
